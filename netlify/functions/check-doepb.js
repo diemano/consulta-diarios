@@ -5,7 +5,7 @@ import nodemailer from "nodemailer";
 
 const DOE_LIST_URL = "https://auniao.pb.gov.br/doe";
 const DATA_DIR = "/tmp"; // Netlify temp
-const HISTORY_FILE = "data/history.json"; // persisted via included_files
+const HISTORY_FILE = process.env.HISTORY_FILE || path.join("/tmp", "history.json");
 
 async function getPdfJs() {
   // carrega ESM mesmo se a função estiver em CJS
