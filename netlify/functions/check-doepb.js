@@ -1,5 +1,5 @@
 import fetch from "node-fetch";
-import pdf from "pdf-parse";
+import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import fs from "fs/promises";
 import path from "path";
 import nodemailer from "nodemailer";
@@ -50,15 +50,38 @@ async function downloadPdf(url) {
   return file;
 }
 
-async function searchTermsInPdf(file, terms) {
-  const data = await pdf(await fs.readFile(file));
-  const textNorm = normalize(data.text);
+async function searchTermsInPdf(file, terms, { wantSnippets = false } = {}) {
+  const data = await fs.readFile(file);
+  const loadingTask = pdfjsLib.getDocument({ data });
+  const pdfDoc = await loadingTask.promise;
+
+  let raw = "";
+  for (let p = 1; p <= pdfDoc.numPages; p++) {
+    const page = await pdfDoc.getPage(p);
+    const tc = await page.getTextContent();
+    raw += tc.items.map(it => (it.str || "")).join(" ") + "\n";
+  }
+
+  const textNorm = normalize(raw);
   const hits = [];
+  const snippets = [];
+
   for (const t of terms) {
     const tNorm = normalize(t);
-    if (textNorm.includes(tNorm)) hits.push(t);
+    const idx = textNorm.indexOf(tNorm);
+    if (idx !== -1) {
+      hits.push(t);
+      if (wantSnippets) {
+        const start = Math.max(0, idx - 120);
+        const end = Math.min(textNorm.length, idx + tNorm.length + 120);
+        const approxStart = Math.max(0, Math.floor(start * (raw.length / textNorm.length)));
+        const approxEnd = Math.min(raw.length, Math.ceil(end * (raw.length / textNorm.length)));
+        const snippetRaw = raw.slice(approxStart, approxEnd).replace(/\s+/g, " ");
+        snippets.push(`[…] ${snippetRaw} […]`);
+      }
+    }
   }
-  return hits;
+  return { hits, snippets };
 }
 
 async function notifyEmail({ subject, html }) {
