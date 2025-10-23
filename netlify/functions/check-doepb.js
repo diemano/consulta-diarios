@@ -55,8 +55,13 @@ async function downloadPdf(url) {
 }
 
 async function searchTermsInPdf(file, terms, { wantSnippets = false } = {}) {
-  const data = await fs.readFile(file);
-  const pdfjsLib = await getPdfJs();                       // <— AQUI é dinâmico
+  // Lê o arquivo como Buffer e converte para Uint8Array
+  const buf = await fs.readFile(file);
+  const data = new Uint8Array(buf);
+
+  // Import dinâmico para funcionar em CJS/ESM
+  const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
+
   const loadingTask = pdfjsLib.getDocument({ data });
   const pdfDoc = await loadingTask.promise;
 
@@ -86,6 +91,7 @@ async function searchTermsInPdf(file, terms, { wantSnippets = false } = {}) {
       }
     }
   }
+
   return { hits, snippets };
 }
 
