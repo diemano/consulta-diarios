@@ -6,8 +6,19 @@ import { getStore } from "@netlify/blobs";
 
 const DOE_LIST_URL = "https://auniao.pb.gov.br/doe";
 
-// ===== Persistência (Netlify Blobs) =====
-const store = getStore({ name: "doe-history", consistency: "strong" });
+// Use SEMPRE as env vars (você já as criou)
+const siteID = process.env.BLOBS_SITE_ID;
+const token  = process.env.BLOBS_TOKEN;
+
+// Cria o store com credenciais explícitas
+const store = getStore({
+  name: "doe-history",
+  siteID,
+  token,
+  consistency: "strong",
+});
+
+// Helpers de persistência
 async function loadHistory() {
   const raw = await store.get("history.json");
   return raw ? JSON.parse(raw) : { lastSeenHref: null, runs: [] };
@@ -15,6 +26,7 @@ async function loadHistory() {
 async function saveHistory(h) {
   await store.set("history.json", JSON.stringify(h));
 }
+
 
 // ===== Utilitários =====
 function normalize(s) {
