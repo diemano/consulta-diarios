@@ -1,7 +1,6 @@
 import fetch from "node-fetch";
 import fs from "fs/promises";
 import path from "path";
-import nodemailer from "nodemailer";
 import { getStore } from "@netlify/blobs";
 
 const DOE_LIST_URL = "https://auniao.pb.gov.br/doe";
@@ -57,7 +56,6 @@ function extractDoeEditionFromUrl(u) {
 function formatEditionFromHTTPDate(httpDate) {
   const d = new Date(httpDate);
   if (isNaN(d)) return null;
-  // formata em pt-BR (Fortaleza)
   return d.toLocaleDateString("pt-BR", { timeZone: "America/Fortaleza" });
 }
 
@@ -125,22 +123,45 @@ async function searchTermsInPdf(file, terms, { wantSnippets = false } = {}) {
   return { hits, snippets };
 }
 
-// ===== Notificações =====
-async function notifyEmail({ subject, html, to }) {
-  const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, MAIL_TO, MAIL_FROM } = process.env;
-  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) return;
-  const transporter = nodemailer.createTransport({
-    host: SMTP_HOST,
-    port: Number(SMTP_PORT || 587),
-    secure: false,
-    auth: { user: SMTP_USER, pass: SMTP_PASS }
-  });
-  await transporter.sendMail({
-    from: MAIL_FROM || SMTP_USER,
-    to: to || MAIL_TO,        // << usa "to" do grupo; se não vier, cai no MAIL_TO
+// ===== Envio de e-mail via Netlify Emails (Mailgun) =====
+async function notifyEmail({ to, subject, parameters }) {
+  const base =
+    process.env.URL ||
+    process.env.DEPLOY_PRIME_URL ||
+    "http://localhost:8888";
+  const endpoint = `${base}/.netlify/functions/emails/alert`;
+
+  const secret = process.env.NETLIFY_EMAILS_SECRET;
+  if (!secret) throw new Error("NETLIFY_EMAILS_SECRET não definido.");
+
+  const payload = {
+    from: process.env.MAIL_FROM || "no-reply@seu-dominio.com",
+    to: to || process.env.MAIL_TO,
     subject,
-    html
+    parameters: {
+      source: parameters?.source,
+      edition: parameters?.edition,
+      pdfUrl: parameters?.pdfUrl,
+      found: !!parameters?.found,
+      hits: Array.isArray(parameters?.hits) ? parameters.hits.join(", ") : (parameters?.hits || ""),
+      snippets: parameters?.snippets || "",
+      groupName: parameters?.groupName || ""
+    }
+  };
+
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "netlify-emails-secret": secret,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify(payload)
   });
+
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    throw new Error(`Falha ao enviar e-mail (${res.status}): ${t}`);
+  }
 }
 
 async function notifyTelegram({ text }) {
@@ -160,10 +181,7 @@ async function collectDOE() {
   const edition = extractDoeEditionFromUrl(url);
   return { source: "DOE/PB", url, edition, dedupKey: url };
 }
-
 async function collectDEJT() {
-  // URL fixa que muda todo dia
-  // usa Last-Modified para descobrir edição e para evitar duplicado
   let edition = null;
   let dedupKey = null;
   try {
@@ -175,7 +193,6 @@ async function collectDEJT() {
     }
   } catch {}
   if (!edition) {
-    // fallback: hoje
     edition = new Date().toLocaleDateString("pt-BR", { timeZone: "America/Fortaleza" });
   }
   if (!dedupKey) dedupKey = `${DEJT_URL}#${edition}`;
@@ -193,20 +210,20 @@ export const handler = async (event) => {
     const wantSnippets = qp.snippets === "1";
     const save = qp.save === "1";            // permite salvar histórico mesmo com url=...
     const SEND_EMPTY = process.env.SEND_EMPTY === "1";
+
     const hist = await loadHistory();
-    const config = await loadConfig(store);           // << NOVO
+    const config = await loadConfig(store);
     const groups = Array.isArray(config.groups) ? config.groups : [];
 
-    // --- Monte os termos a pesquisar a partir dos GRUPOS quando não houver override (?t=)
     // Fontes-alvo conforme ?source=
     const sourcesWanted = !sourceFilter
       ? ["DOE/PB", "DEJT TRT-13"]
       : (sourceFilter === "dejt" ? ["DEJT TRT-13"] : ["DOE/PB"]);
-    
+
+    // Termos: override (?terms) > grupos (por fonte) > TERMs de env
     let TERMS = (termsOverride || process.env.TERMS || "")
       .split(",").map(s => s.trim()).filter(Boolean);
-    
-    // Se NÃO veio ?t= (override), use a união de termos dos grupos para as fontes desejadas
+
     if (!termsOverride && groups.length) {
       const set = new Set();
       for (const g of groups) {
@@ -216,53 +233,70 @@ export const handler = async (event) => {
       }
       if (set.size) TERMS = Array.from(set);
     }
-    
-    // Se ainda assim ficar vazio, encerre cedo
+
     if (!TERMS.length) {
       return { statusCode: 200, body: "Sem termos configurados (grupos) para as fontes selecionadas." };
     }
-    
-    // Modo “manual” com ?url= — comportamento anterior
+
+    // ===== Modo MANUAL (url=...) =====
     if (urlOverride) {
       const file = await downloadPdf(urlOverride);
       const { hits, snippets } = await searchTermsInPdf(file, TERMS, { wantSnippets });
       const found = hits.length > 0;
-      
-      // defina fonte/edição ANTES de alertar por grupo
+
       const editionDoe = extractDoeEditionFromUrl(urlOverride);
       const source = sourceFilter === "dejt" ? "DEJT TRT-13"
                    : sourceFilter === "doepb" ? "DOE/PB"
                    : (editionDoe ? "DOE/PB" : "DEJT TRT-13");
       const edition = editionDoe || new Date().toLocaleDateString("pt-BR", { timeZone: "America/Fortaleza" });
-      
-      // ===== alertas por GRUPO (manual) =====
+
+      // alertas por GRUPO (manual)
       const matchedGroups = groups.filter(g =>
         (g.sources || []).includes(source) &&
         (g.terms || []).some(t => hits.includes(t))
       );
-      
       for (const g of matchedGroups) {
         if (g.notifyEmail && g.email) {
-          const subject = `[${source}] (${g.name}) encontrei ${hits.join(", ")}`;
-          const html =
-            `<p>Grupo: <b>${g.name}</b><br/>Fonte: <b>${source}</b><br/>Edição: <b>${edition}</b><br/>Arquivo: <a href="${urlOverride}">PDF</a></p>` +
-            `<p>Termos do grupo: <b>${g.terms.join(", ")}</b></p>` +
-            `<p>Encontrados: <b>${hits.join(", ")}</b></p>` +
-            (wantSnippets && snippets?.length ? `<pre>${snippets.join("\n---\n")}</pre>` : "");
-          await notifyEmail({ subject, html, to: g.email });
+          await notifyEmail({
+            to: g.email,
+            subject: `[${source}] (${g.name}) encontrei ${hits.join(", ")}`,
+            parameters: {
+              source,
+              edition,
+              pdfUrl: urlOverride,
+              found,
+              hits,
+              snippets: wantSnippets && snippets?.length ? snippets.join("\n---\n") : "",
+              groupName: g.name
+            }
+          });
         }
       }
+
+      // alerta GLOBAL (manual)
       if (found && !dry) {
-        const subject = `[${source}] encontrei ${hits.join(", ")} 🎯`;
-        const html = `<p>Fonte: <b>${source}</b><br/>Edição: <b>${edition}</b><br/>Arquivo: <a href="${urlOverride}">PDF</a></p>` +
-          `<p>Termos: <b>${hits.join(", ")}</b></p>` +
-          (wantSnippets && snippets?.length ? `<pre>${snippets.join("\n---\n")}</pre>` : "");
-        await notifyEmail({ subject, html });
+        await notifyEmail({
+          subject: `[${source}] encontrei ${hits.join(", ")} 🎯`,
+          parameters: {
+            source,
+            edition,
+            pdfUrl: urlOverride,
+            found: true,
+            hits,
+            snippets: wantSnippets && snippets?.length ? snippets.join("\n---\n") : ""
+          }
+        });
         await notifyTelegram({ text: `${source} ✅ ${hits.join(", ")}\n${urlOverride}` });
       } else if (!found && SEND_EMPTY && !dry) {
         await notifyEmail({
           subject: `[${source}] nenhum termo encontrado`,
-          html: `<p>Fonte: <b>${source}</b><br/>Edição: <b>${edition}</b><br/>Arquivo: <a href="${urlOverride}">PDF</a></p><p>Nada encontrado.</p>`
+          parameters: {
+            source,
+            edition,
+            pdfUrl: urlOverride,
+            found: false,
+            hits: []
+          }
         });
         await notifyTelegram({ text: `${source} ⭕ nada\n${urlOverride}` });
       }
@@ -290,7 +324,7 @@ export const handler = async (event) => {
       };
     }
 
-    // Execução “do dia”: rodar 1..N fontes
+    // ===== Execução DIÁRIA =====
     const collectors = [];
     if (!sourceFilter || sourceFilter === "doepb") collectors.push(collectDOE);
     if (!sourceFilter || sourceFilter === "dejt")  collectors.push(collectDEJT);
@@ -301,7 +335,6 @@ export const handler = async (event) => {
       const meta = await collect(); // { source, url, edition, dedupKey }
       const lastSeenKey = hist.lastSeen[meta.source];
 
-      // evita retrabalho no mesmo dia/fonte
       if (lastSeenKey === meta.dedupKey) {
         results.push({ ...meta, skipped: true, message: "Sem edição nova." });
         continue;
@@ -311,36 +344,53 @@ export const handler = async (event) => {
       const { hits, snippets } = await searchTermsInPdf(file, TERMS, { wantSnippets });
       const found = hits.length > 0;
 
-      // ===== alertas por GRUPO (diário) =====
+      // alertas por GRUPO (diário)
       const matchedGroups = groups.filter(g =>
         (g.sources || []).includes(meta.source) &&
         (g.terms || []).some(t => hits.includes(t))
       );
-      
       for (const g of matchedGroups) {
         if (g.notifyEmail && g.email) {
-          const subject = `[${meta.source}] (${g.name}) encontrei ${hits.join(", ")}`;
-          const html =
-            `<p>Grupo: <b>${g.name}</b><br/>Fonte: <b>${meta.source}</b><br/>Edição: <b>${meta.edition}</b><br/>Arquivo: <a href="${meta.url}">PDF</a></p>` +
-            `<p>Termos do grupo: <b>${g.terms.join(", ")}</b></p>` +
-            `<p>Encontrados: <b>${hits.join(", ")}</b></p>` +
-            (wantSnippets && snippets?.length ? `<pre>${snippets.join("\n---\n")}</pre>` : "");
-          await notifyEmail({ subject, html, to: g.email });
+          await notifyEmail({
+            to: g.email,
+            subject: `[${meta.source}] (${g.name}) encontrei ${hits.join(", ")}`,
+            parameters: {
+              source: meta.source,
+              edition: meta.edition,
+              pdfUrl: meta.url,
+              found,
+              hits,
+              snippets: wantSnippets && snippets?.length ? snippets.join("\n---\n") : "",
+              groupName: g.name
+            }
+          });
         }
-      }      
-      // alertas
+      }
+
+      // alerta GLOBAL (diário)
       if (found && !dry) {
-        const subject = `[${meta.source}] encontrei ${hits.join(", ")} 🎯`;
-        const html =
-          `<p>Fonte: <b>${meta.source}</b><br/>Edição: <b>${meta.edition}</b><br/>Arquivo: <a href="${meta.url}">PDF</a></p>` +
-          `<p>Termos: <b>${hits.join(", ")}</b></p>` +
-          (wantSnippets && snippets?.length ? `<pre>${snippets.join("\n---\n")}</pre>` : "");
-        await notifyEmail({ subject, html });
+        await notifyEmail({
+          subject: `[${meta.source}] encontrei ${hits.join(", ")} 🎯`,
+          parameters: {
+            source: meta.source,
+            edition: meta.edition,
+            pdfUrl: meta.url,
+            found: true,
+            hits,
+            snippets: wantSnippets && snippets?.length ? snippets.join("\n---\n") : ""
+          }
+        });
         await notifyTelegram({ text: `${meta.source} ✅ ${hits.join(", ")}\n${meta.url}` });
       } else if (!found && SEND_EMPTY && !dry) {
         await notifyEmail({
           subject: `[${meta.source}] nenhum termo encontrado`,
-          html: `<p>Fonte: <b>${meta.source}</b><br/>Edição: <b>${meta.edition}</b><br/>Arquivo: <a href="${meta.url}">PDF</a></p><p>Nada encontrado.</p>`
+          parameters: {
+            source: meta.source,
+            edition: meta.edition,
+            pdfUrl: meta.url,
+            found: false,
+            hits: []
+          }
         });
         await notifyTelegram({ text: `${meta.source} ⭕ nada\n${meta.url}` });
       }
@@ -357,14 +407,10 @@ export const handler = async (event) => {
 
     await saveHistory(hist);
 
-    // resposta compacta do dia
     return {
       statusCode: 200,
       headers: { "content-type": "application/json; charset=utf-8" },
-      body: JSON.stringify({
-        termsUsed: TERMS,
-        results
-      }, null, 2)
+      body: JSON.stringify({ termsUsed: TERMS, results }, null, 2)
     };
 
   } catch (e) {
