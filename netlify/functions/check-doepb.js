@@ -29,6 +29,12 @@ async function saveHistory(h) {
   await store.set("history.json", JSON.stringify(h));
 }
 
+// ==== Config (grupos) no mesmo store ====
+async function loadConfig(store) {
+  const raw = await store.get("config.json");
+  return raw ? JSON.parse(raw) : { groups: [] };
+}
+
 // ===== Utilitários =====
 function clean(s) {
   return s
@@ -120,16 +126,21 @@ async function searchTermsInPdf(file, terms, { wantSnippets = false } = {}) {
 }
 
 // ===== Notificações =====
-async function notifyEmail({ subject, html }) {
+async function notifyEmail({ subject, html, to }) {
   const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, MAIL_TO, MAIL_FROM } = process.env;
-  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS || !MAIL_TO) return;
+  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) return;
   const transporter = nodemailer.createTransport({
     host: SMTP_HOST,
     port: Number(SMTP_PORT || 587),
     secure: false,
     auth: { user: SMTP_USER, pass: SMTP_PASS }
   });
-  await transporter.sendMail({ from: MAIL_FROM || SMTP_USER, to: MAIL_TO, subject, html });
+  await transporter.sendMail({
+    from: MAIL_FROM || SMTP_USER,
+    to: to || MAIL_TO,        // << usa "to" do grupo; se não vier, cai no MAIL_TO
+    subject,
+    html
+  });
 }
 
 async function notifyTelegram({ text }) {
@@ -182,27 +193,65 @@ export const handler = async (event) => {
     const wantSnippets = qp.snippets === "1";
     const save = qp.save === "1";            // permite salvar histórico mesmo com url=...
     const SEND_EMPTY = process.env.SEND_EMPTY === "1";
-
-    const TERMS = (termsOverride || process.env.TERMS || "")
-      .split(",").map(s => s.trim()).filter(Boolean);
-    if (!TERMS.length) {
-      return { statusCode: 200, body: "Sem termos configurados." };
-    }
-
     const hist = await loadHistory();
+    const config = await loadConfig(store);           // << NOVO
+    const groups = Array.isArray(config.groups) ? config.groups : [];
 
+    // --- Monte os termos a pesquisar a partir dos GRUPOS quando não houver override (?t=)
+    // Fontes-alvo conforme ?source=
+    const sourcesWanted = !sourceFilter
+      ? ["DOE/PB", "DEJT TRT-13"]
+      : (sourceFilter === "dejt" ? ["DEJT TRT-13"] : ["DOE/PB"]);
+    
+    let TERMS = (termsOverride || process.env.TERMS || "")
+      .split(",").map(s => s.trim()).filter(Boolean);
+    
+    // Se NÃO veio ?t= (override), use a união de termos dos grupos para as fontes desejadas
+    if (!termsOverride && groups.length) {
+      const set = new Set();
+      for (const g of groups) {
+        if (g.sources?.some(s => sourcesWanted.includes(s))) {
+          (g.terms || []).forEach(t => t && set.add(t));
+        }
+      }
+      if (set.size) TERMS = Array.from(set);
+    }
+    
+    // Se ainda assim ficar vazio, encerre cedo
+    if (!TERMS.length) {
+      return { statusCode: 200, body: "Sem termos configurados (grupos) para as fontes selecionadas." };
+    }
+    
     // Modo “manual” com ?url= — comportamento anterior
     if (urlOverride) {
       const file = await downloadPdf(urlOverride);
       const { hits, snippets } = await searchTermsInPdf(file, TERMS, { wantSnippets });
       const found = hits.length > 0;
+      
+      // defina fonte/edição ANTES de alertar por grupo
       const editionDoe = extractDoeEditionFromUrl(urlOverride);
-      // tenta extrair ao menos uma “fonte” plausível
-      const source = sourceFilter === "dejt" ? "DEJT TRT-13" :
-                     sourceFilter === "doepb" ? "DOE/PB" :
-                     (editionDoe ? "DOE/PB" : "DEJT TRT-13");
-      const edition = editionDoe || formatEditionFromHTTPDate("") || new Date().toLocaleDateString("pt-BR", { timeZone: "America/Fortaleza" });
-
+      const source = sourceFilter === "dejt" ? "DEJT TRT-13"
+                   : sourceFilter === "doepb" ? "DOE/PB"
+                   : (editionDoe ? "DOE/PB" : "DEJT TRT-13");
+      const edition = editionDoe || new Date().toLocaleDateString("pt-BR", { timeZone: "America/Fortaleza" });
+      
+      // ===== alertas por GRUPO (manual) =====
+      const matchedGroups = groups.filter(g =>
+        (g.sources || []).includes(source) &&
+        (g.terms || []).some(t => hits.includes(t))
+      );
+      
+      for (const g of matchedGroups) {
+        if (g.notifyEmail && g.email) {
+          const subject = `[${source}] (${g.name}) encontrei ${hits.join(", ")}`;
+          const html =
+            `<p>Grupo: <b>${g.name}</b><br/>Fonte: <b>${source}</b><br/>Edição: <b>${edition}</b><br/>Arquivo: <a href="${urlOverride}">PDF</a></p>` +
+            `<p>Termos do grupo: <b>${g.terms.join(", ")}</b></p>` +
+            `<p>Encontrados: <b>${hits.join(", ")}</b></p>` +
+            (wantSnippets && snippets?.length ? `<pre>${snippets.join("\n---\n")}</pre>` : "");
+          await notifyEmail({ subject, html, to: g.email });
+        }
+      }
       if (found && !dry) {
         const subject = `[${source}] encontrei ${hits.join(", ")} 🎯`;
         const html = `<p>Fonte: <b>${source}</b><br/>Edição: <b>${edition}</b><br/>Arquivo: <a href="${urlOverride}">PDF</a></p>` +
@@ -219,7 +268,8 @@ export const handler = async (event) => {
       }
 
       if (save) {
-        const entry = { when: new Date().toISOString(), source, edition, pdfUrl: urlOverride, found, hits };
+        const groupsHit = matchedGroups.map(g => g.name);
+        const entry = { when: new Date().toISOString(), source, edition, pdfUrl: urlOverride, found, hits, groupsHit };
         hist.runs.unshift(entry);
         hist.runs = hist.runs.slice(0, 300);
         await saveHistory(hist);
@@ -261,6 +311,23 @@ export const handler = async (event) => {
       const { hits, snippets } = await searchTermsInPdf(file, TERMS, { wantSnippets });
       const found = hits.length > 0;
 
+      // ===== alertas por GRUPO (diário) =====
+      const matchedGroups = groups.filter(g =>
+        (g.sources || []).includes(meta.source) &&
+        (g.terms || []).some(t => hits.includes(t))
+      );
+      
+      for (const g of matchedGroups) {
+        if (g.notifyEmail && g.email) {
+          const subject = `[${meta.source}] (${g.name}) encontrei ${hits.join(", ")}`;
+          const html =
+            `<p>Grupo: <b>${g.name}</b><br/>Fonte: <b>${meta.source}</b><br/>Edição: <b>${meta.edition}</b><br/>Arquivo: <a href="${meta.url}">PDF</a></p>` +
+            `<p>Termos do grupo: <b>${g.terms.join(", ")}</b></p>` +
+            `<p>Encontrados: <b>${hits.join(", ")}</b></p>` +
+            (wantSnippets && snippets?.length ? `<pre>${snippets.join("\n---\n")}</pre>` : "");
+          await notifyEmail({ subject, html, to: g.email });
+        }
+      }      
       // alertas
       if (found && !dry) {
         const subject = `[${meta.source}] encontrei ${hits.join(", ")} 🎯`;
@@ -280,14 +347,8 @@ export const handler = async (event) => {
 
       // histórico
       hist.lastSeen[meta.source] = meta.dedupKey;
-      const entry = {
-        when: new Date().toISOString(),
-        source: meta.source,
-        edition: meta.edition,
-        pdfUrl: meta.url,
-        found,
-        hits
-      };
+      const groupsHit = matchedGroups.map(g => g.name);
+      const entry = { when: new Date().toISOString(), source: meta.source, edition: meta.edition, pdfUrl: meta.url, found, hits, groupsHit };
       hist.runs.unshift(entry);
       hist.runs = hist.runs.slice(0, 300);
 
