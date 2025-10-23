@@ -29,6 +29,14 @@ async function saveHistory(h) {
 
 
 // ===== Utilitários =====
+
+function extractEditionFromUrl(u) {
+  const m = /diario-oficial-(\d{2})-(\d{2})-(\d{4})-portal\.pdf/i.exec(u || "");
+  if (!m) return null;
+  const [_, dd, mm, yyyy] = m;
+  return `${dd}/${mm}/${yyyy}`;
+}
+
 function normalize(s) {
   return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 }
@@ -196,7 +204,8 @@ export const handler = async (event) => {
         when: new Date().toISOString(),
         pdfUrl,
         found,
-        hits
+        hits,
+        edition: extractEditionFromUrl(pdfUrl)
       };
       hist.runs ??= [];
       hist.runs.unshift(entry);
@@ -210,6 +219,7 @@ export const handler = async (event) => {
       headers: { "content-type": "application/json; charset=utf-8" },
       body: JSON.stringify({
         pdfUrl,
+        edition: extractEditionFromUrl(pdfUrl),
         termsUsed: TERMS,
         count: hits.length,
         hits,
