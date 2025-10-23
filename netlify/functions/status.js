@@ -102,4 +102,122 @@ exports.handler = async () => {
   .chips{display:flex;gap:8px;flex-wrap:wrap}
   .chip{background:var(--chip);color:var(--chip-text);border-radius:999px;padding:4px 10px;font-size:12px;font-weight:600}
   .grid{display:grid;grid-template-columns:repeat(1,minmax(0,1fr));gap:16px}
-  @media (min-wi
+  @media (min-width:700px){ .grid{grid-template-columns:repeat(2,minmax(0,1fr))} }
+  @media (min-width:1024px){ .grid{grid-template-columns:repeat(3,minmax(0,1fr))} }
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);padding:16px;display:flex;flex-direction:column;gap:12px}
+  .row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+  .badge{display:inline-flex;align-items:center;gap:8px;font-weight:700;padding:6px 10px;border-radius:999px}
+  .badge.ok{background:rgba(22,163,74,.12);color:var(--ok)}
+  .badge.nok{background:rgba(239,68,68,.12);color:var(--bad)}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:8px 12px}
+  .kv dt{color:var(--muted)}
+  .kv dd{margin:0}
+  .empty{padding:40px;text-align:center;border:1px dashed var(--border);border-radius:16px;background:var(--surface)}
+  .foot{margin:16px 0;color:var(--muted);font-size:13px}
+</style>
+
+<body>
+  <div class="wrap">
+    <header>
+      <div class="logo">D</div>
+      <div>
+        <h1>Monitor de Diários — status</h1>
+        <div class="muted">Acompanhe as execuções diárias do DOE/PB e DEJT TRT-13.</div>
+      </div>
+    </header>
+
+    <div class="toolbar">
+      <div class="control">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M21 21l-4.3-4.3M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Z" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <input id="q" type="search" placeholder="Buscar por termo ou fonte…" />
+      </div>
+      <div class="control">
+        <span class="muted">Fonte</span>
+        <select id="source"><option value="">Todas</option>${sources.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join("")}</select>
+      </div>
+      <label class="control toggle">
+        <input id="onlyFound" type="checkbox" />
+        <span>Somente encontrados</span>
+      </label>
+    </div>
+
+    <div id="list" class="grid"></div>
+    <div id="empty" class="empty" style="display:none">Nenhum item com os filtros atuais.</div>
+
+    <div class="foot muted">Atualizado a cada execução diária. Clique em “PDF” para abrir a edição correspondente.</div>
+  </div>
+
+  <script>
+    const runs = ${JSON.stringify(runs)};
+
+    const $q = document.getElementById('q');
+    const $source = document.getElementById('source');
+    const $onlyFound = document.getElementById('onlyFound');
+    const $list = document.getElementById('list');
+    const $empty = document.getElementById('empty');
+
+    const esc = (s='') => s.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
+
+    function render(items){
+      $list.innerHTML = items.map(it => {
+        const badge = it.found
+          ? '<span class="badge ok">✅ Encontrado</span>'
+          : '<span class="badge nok">⭕ Nada</span>';
+
+        const chips = (it.terms && it.terms.length)
+          ? it.terms.map(t => '<span class="chip">'+esc(t)+'</span>').join(' ')
+          : '<span class="muted">—</span>';
+
+        return \`
+          <article class="card">
+            <div class="row">
+              <div class="chips">
+                <span class="chip">\${esc(it.source)}</span>
+                <span class="chip">Edição: \${esc(it.edition)}</span>
+              </div>
+              \${badge}
+            </div>
+            <dl class="kv">
+              <dt>Data/Hora</dt><dd>\${esc(it.whenFmt)}</dd>
+              <dt>Arquivo</dt><dd><a href="\${esc(it.pdfUrl)}" target="_blank" rel="noopener">PDF</a></dd>
+              <dt>Termos</dt><dd>\${chips}</dd>
+            </dl>
+          </article>\`;
+      }).join('');
+
+      $empty.style.display = items.length ? 'none' : 'block';
+    }
+
+    function applyFilters(){
+      const q = ($q.value || '').toLowerCase().trim();
+      const source = $source.value || '';
+      const only = $onlyFound.checked;
+
+      let items = runs.slice();
+      if (source) items = items.filter(r => r.source === source);
+      if (only) items = items.filter(r => r.found);
+
+      if (q) {
+        items = items.filter(r => {
+          const hay = [r.source, ...(r.terms||[])].join(' ').toLowerCase();
+          return hay.includes(q);
+        });
+      }
+
+      render(items);
+    }
+
+    $q.addEventListener('input', applyFilters);
+    $source.addEventListener('change', applyFilters);
+    $onlyFound.addEventListener('change', applyFilters);
+
+    render(runs);
+  </script>
+</body>`;
+
+  return {
+    statusCode: 200,
+    headers: { "content-type": "text/html; charset=utf-8" },
+    body: html
+  };
+};
