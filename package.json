@@ -3,9 +3,10 @@
   "version": "1.0.0",
   "type": "module",
   "dependencies": {
+    "@netlify/blobs": "^6.4.0",
+    "he": "^1.2.0",
     "node-fetch": "^3.3.2",
-    "pdfjs-dist": "^4.8.69",
     "nodemailer": "^6.9.13",
-    "he": "^1.2.0"
+    "pdfjs-dist": "^4.8.69"
   }
 }
