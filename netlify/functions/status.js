@@ -1,9 +1,19 @@
 import { getStore } from "@netlify/blobs";
 
 export const handler = async () => {
-  const store = getStore({ name: "doe-history", consistency: "strong" });
-  const raw = await store.get("history.json");
+  // use SEMPRE as env vars que você já configurou
+  const siteID = process.env.BLOBS_SITE_ID;
+  const token  = process.env.BLOBS_TOKEN;
 
+  // cria o store com credenciais explícitas
+  const store = getStore({
+    name: "doe-history",
+    siteID,
+    token,
+    consistency: "strong",
+  });
+
+  const raw = await store.get("history.json");
   if (!raw) return { statusCode: 200, body: "Sem histórico ainda." };
 
   const j = JSON.parse(raw);
