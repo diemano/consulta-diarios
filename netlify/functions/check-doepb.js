@@ -2,66 +2,77 @@ import fetch from "node-fetch";
 import fs from "fs/promises";
 import path from "path";
 import nodemailer from "nodemailer";
+import { getStore } from "@netlify/blobs";
 
 const DOE_LIST_URL = "https://auniao.pb.gov.br/doe";
-const DATA_DIR = "/tmp"; // Netlify temp
-const HISTORY_FILE = process.env.HISTORY_FILE || path.join("/tmp", "history.json");
 
-async function getPdfJs() {
-  // carrega ESM mesmo se a função estiver em CJS
-  return await import("pdfjs-dist/legacy/build/pdf.mjs");
-}
-
-function normalize(s) {
-  return s
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase();
-}
-
+// ===== Persistência (Netlify Blobs) =====
+const store = getStore({ name: "doe-history", consistency: "strong" });
 async function loadHistory() {
-  try {
-    return JSON.parse(await fs.readFile(HISTORY_FILE, "utf-8"));
-  } catch {
-    return { lastSeenHref: null, hits: [] };
-  }
+  const raw = await store.get("history.json");
+  return raw ? JSON.parse(raw) : { lastSeenHref: null, runs: [] };
 }
 async function saveHistory(h) {
-  await fs.mkdir(path.dirname(HISTORY_FILE), { recursive: true });
-  await fs.writeFile(HISTORY_FILE, JSON.stringify(h, null, 2));
+  await store.set("history.json", JSON.stringify(h));
+}
+
+// ===== Utilitários =====
+function normalize(s) {
+  return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
+function clean(s) {
+  return s
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+function makeElasticRegex(term) {
+  const letters = clean(term).replace(/[^a-z0-9]/g, "");
+  const esc = letters.split("").map(ch => ch.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&")).join("\\W*");
+  return new RegExp(esc, "iu");
 }
 
 function parsePdfHrefFromHtml(html) {
-  // encontra o primeiro link para "Diário Oficial DD-MM-YYYY Portal.pdf"
+  // tenta achar link do “Diário Oficial DD-MM-YYYY Portal.pdf”
   const m = html.match(/href="([^"]+diario-oficial-\d{2}-\d{2}-\d{4}-portal\.pdf)"/i);
   return m ? new URL(m[1], DOE_LIST_URL).href : null;
 }
 
 async function fetchLatestPdfUrl() {
   const res = await fetch(DOE_LIST_URL, { timeout: 20000 });
+  if (!res.ok) throw new Error("Falha ao abrir a página do DOE.");
   const html = await res.text();
   const href = parsePdfHrefFromHtml(html);
   if (!href) throw new Error("Não achei link do PDF na página do DOE.");
   return href;
 }
 
+const TMP_DIR = "/tmp";
 async function downloadPdf(url) {
+  // Suporte a file:// para testes locais (opcional)
+  if (url.startsWith("file://")) {
+    const p = url.replace("file://", "");
+    const buf = await fs.readFile(p);
+    const file = path.join(TMP_DIR, "doe.pdf");
+    await fs.writeFile(file, buf);
+    return file;
+  }
   const r = await fetch(url, { timeout: 60000 });
   if (!r.ok) throw new Error(`Falha ao baixar PDF: ${r.status}`);
   const buf = Buffer.from(await r.arrayBuffer());
-  const file = path.join(DATA_DIR, "doe.pdf");
+  const file = path.join(TMP_DIR, "doe.pdf");
   await fs.writeFile(file, buf);
   return file;
 }
 
+// ===== Leitura do PDF com pdfjs-dist (compatível com Functions) =====
 async function searchTermsInPdf(file, terms, { wantSnippets = false } = {}) {
-  // Lê o arquivo como Buffer e converte para Uint8Array
   const buf = await fs.readFile(file);
   const data = new Uint8Array(buf);
 
-  // Import dinâmico para funcionar em CJS/ESM
+  // import dinâmico funciona em CJS/ESM
   const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
-
   const loadingTask = pdfjsLib.getDocument({ data });
   const pdfDoc = await loadingTask.promise;
 
@@ -69,23 +80,24 @@ async function searchTermsInPdf(file, terms, { wantSnippets = false } = {}) {
   for (let p = 1; p <= pdfDoc.numPages; p++) {
     const page = await pdfDoc.getPage(p);
     const tc = await page.getTextContent();
+    // concatena itens; alguns PDFs têm NBSP e quebras estranhas
     raw += tc.items.map(it => (it.str || "")).join(" ") + "\n";
   }
 
-  const textNorm = normalize(raw);
+  const textClean = clean(raw);
+
   const hits = [];
   const snippets = [];
 
-  for (const t of terms) {
-    const tNorm = normalize(t);
-    const idx = textNorm.indexOf(tNorm);
-    if (idx !== -1) {
-      hits.push(t);
+  for (const term of terms) {
+    const rx = makeElasticRegex(term);
+    const m = textClean.match(rx);
+    if (m) {
+      hits.push(term);
       if (wantSnippets) {
-        const start = Math.max(0, idx - 120);
-        const end = Math.min(textNorm.length, idx + tNorm.length + 120);
-        const approxStart = Math.max(0, Math.floor(start * (raw.length / textNorm.length)));
-        const approxEnd = Math.min(raw.length, Math.ceil(end * (raw.length / textNorm.length)));
+        const idxClean = m.index ?? 0;
+        const approxStart = Math.max(0, Math.floor(idxClean * (raw.length / textClean.length)) - 200);
+        const approxEnd = Math.min(raw.length, approxStart + 400);
         const snippetRaw = raw.slice(approxStart, approxEnd).replace(/\s+/g, " ");
         snippets.push(`[…] ${snippetRaw} […]`);
       }
@@ -95,6 +107,7 @@ async function searchTermsInPdf(file, terms, { wantSnippets = false } = {}) {
   return { hits, snippets };
 }
 
+// ===== Notificações =====
 async function notifyEmail({ subject, html }) {
   const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, MAIL_TO, MAIL_FROM } = process.env;
   if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS || !MAIL_TO) return;
@@ -118,15 +131,19 @@ async function notifyTelegram({ text }) {
   });
 }
 
+// ===== Handler =====
 export const handler = async (event) => {
   try {
-    const urlOverride = event?.queryStringParameters?.url;
-    const termsOverride = event?.queryStringParameters?.terms;
-    const dry = event?.queryStringParameters?.dry === "1";
-    const wantSnippets = event?.queryStringParameters?.snippets === "1";
+    const qp = event?.queryStringParameters || {};
+    const urlOverride = qp.url;
+    const termsOverride = qp.terms || qp.t || "";
+    const dry = qp.dry === "1";
+    const wantSnippets = qp.snippets === "1";
+    const SEND_EMPTY = process.env.SEND_EMPTY === "1";
 
     const TERMS = (termsOverride || process.env.TERMS || "")
       .split(",").map(s => s.trim()).filter(Boolean);
+
     if (!TERMS.length) {
       return { statusCode: 200, body: "Sem termos configurados." };
     }
@@ -136,37 +153,56 @@ export const handler = async (event) => {
     const isManual = Boolean(urlOverride);
 
     if (!isManual && hist.lastSeenHref === pdfUrl) {
+      // já processado hoje
       return { statusCode: 200, body: "Sem edição nova." };
     }
 
     const file = await downloadPdf(pdfUrl);
-
-    // ⬇️ pega hits e snippets do parser
     const { hits, snippets } = await searchTermsInPdf(file, TERMS, { wantSnippets });
+    const found = hits.length > 0;
 
-    if (!isManual) hist.lastSeenHref = pdfUrl;
-
-    if (hits.length && !dry) {
+    // alerta quando encontra
+    if (found && !dry) {
       const subject = `DOE/PB: encontrei ${hits.join(", ")} 🎯`;
       const html =
-        `<p>Encontrei no <a href="${pdfUrl}">PDF</a> os termos: <b>${hits.join(", ")}</b>.</p>` +
+        `<p>Encontrei no <a href="${pdfUrl}">DOE/PB</a> os termos: <b>${hits.join(", ")}</b>.</p>` +
         (wantSnippets && snippets?.length ? `<pre>${snippets.join("\n---\n")}</pre>` : "");
       await notifyEmail({ subject, html });
       await notifyTelegram({ text: `DOE/PB ✅ ${hits.join(", ")}\n${pdfUrl}` });
+    } else if (!found && SEND_EMPTY && !dry) {
+      await notifyEmail({
+        subject: "DOE/PB: nenhum termo encontrado hoje",
+        html: `<p>Nada encontrado no <a href="${pdfUrl}">DOE/PB de hoje</a>.</p>`
+      });
+      await notifyTelegram({ text: `DOE/PB ⭕ nada hoje\n${pdfUrl}` });
     }
 
-    if (hits.length && !isManual) {
-      hist.hits ??= [];
-      hist.hits.unshift({ when: new Date().toISOString(), pdfUrl, hits });
-      hist.hits = hist.hits.slice(0, 100);
+    // histórico (somente quando for execução “do dia”, não manual de teste)
+    if (!isManual) {
+      hist.lastSeenHref = pdfUrl;
+      const entry = {
+        when: new Date().toISOString(),
+        pdfUrl,
+        found,
+        hits
+      };
+      hist.runs ??= [];
+      hist.runs.unshift(entry);
+      hist.runs = hist.runs.slice(0, 200);
       await saveHistory(hist);
     }
 
-    // Resposta — escolha JSON p/ testar
+    // resposta JSON (ótimo p/ testes e monitoramento)
     return {
       statusCode: 200,
       headers: { "content-type": "application/json; charset=utf-8" },
-      body: JSON.stringify({ pdfUrl, count: hits.length, hits, ...(wantSnippets ? { snippets } : {}) }, null, 2)
+      body: JSON.stringify({
+        pdfUrl,
+        termsUsed: TERMS,
+        count: hits.length,
+        hits,
+        ...(wantSnippets ? { snippets } : {})
+      }, null, 2)
     };
 
   } catch (e) {
@@ -174,4 +210,3 @@ export const handler = async (event) => {
     return { statusCode: 500, body: "Erro: " + e.message };
   }
 };
-
