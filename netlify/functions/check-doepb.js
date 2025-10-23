@@ -118,36 +118,60 @@ async function notifyTelegram({ text }) {
   });
 }
 
-export const handler = async () => {
+export const handler = async (event) => {
   try {
-    const TERMS = (process.env.TERMS || "").split(",").map(s => s.trim()).filter(Boolean);
-    if (!TERMS.length) return { statusCode: 200, body: "Sem termos configurados." };
+    const urlOverride = event?.queryStringParameters?.url;
+    const termsOverride = event?.queryStringParameters?.terms;
+    const dry = event?.queryStringParameters?.dry === "1";
+    const wantSnippets = event?.queryStringParameters?.snippets === "1";
+
+    const TERMS = (termsOverride || process.env.TERMS || "")
+      .split(",").map(s => s.trim()).filter(Boolean);
+    if (!TERMS.length) {
+      return { statusCode: 200, body: "Sem termos configurados." };
+    }
 
     const hist = await loadHistory();
-    const pdfUrl = await fetchLatestPdfUrl();
+    const pdfUrl = urlOverride || await fetchLatestPdfUrl();
+    const isManual = Boolean(urlOverride);
 
-    if (hist.lastSeenHref === pdfUrl) {
+    if (!isManual && hist.lastSeenHref === pdfUrl) {
       return { statusCode: 200, body: "Sem edição nova." };
     }
 
-    // nova edição
     const file = await downloadPdf(pdfUrl);
-    const hits = await searchTermsInPdf(file, TERMS);
 
-    hist.lastSeenHref = pdfUrl;
-    if (hits.length) {
+    // ⬇️ pega hits e snippets do parser
+    const { hits, snippets } = await searchTermsInPdf(file, TERMS, { wantSnippets });
+
+    if (!isManual) hist.lastSeenHref = pdfUrl;
+
+    if (hits.length && !dry) {
       const subject = `DOE/PB: encontrei ${hits.join(", ")} 🎯`;
       const html =
-        `<p>Encontrei no <a href="${pdfUrl}">DOE/PB de hoje</a> os termos: <b>${hits.join(", ")}</b>.</p>`;
+        `<p>Encontrei no <a href="${pdfUrl}">PDF</a> os termos: <b>${hits.join(", ")}</b>.</p>` +
+        (wantSnippets && snippets?.length ? `<pre>${snippets.join("\n---\n")}</pre>` : "");
       await notifyEmail({ subject, html });
       await notifyTelegram({ text: `DOE/PB ✅ ${hits.join(", ")}\n${pdfUrl}` });
+    }
+
+    if (hits.length && !isManual) {
+      hist.hits ??= [];
       hist.hits.unshift({ when: new Date().toISOString(), pdfUrl, hits });
       hist.hits = hist.hits.slice(0, 100);
+      await saveHistory(hist);
     }
-    await saveHistory(hist);
-    return { statusCode: 200, body: `OK. PDF: ${pdfUrl} | hits: ${hits.length}` };
+
+    // Resposta — escolha JSON p/ testar
+    return {
+      statusCode: 200,
+      headers: { "content-type": "application/json; charset=utf-8" },
+      body: JSON.stringify({ pdfUrl, count: hits.length, hits, ...(wantSnippets ? { snippets } : {}) }, null, 2)
+    };
+
   } catch (e) {
     console.error(e);
     return { statusCode: 500, body: "Erro: " + e.message };
   }
 };
+
