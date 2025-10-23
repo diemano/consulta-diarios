@@ -1,5 +1,4 @@
 import fetch from "node-fetch";
-import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import fs from "fs/promises";
 import path from "path";
 import nodemailer from "nodemailer";
@@ -7,6 +6,11 @@ import nodemailer from "nodemailer";
 const DOE_LIST_URL = "https://auniao.pb.gov.br/doe";
 const DATA_DIR = "/tmp"; // Netlify temp
 const HISTORY_FILE = "data/history.json"; // persisted via included_files
+
+async function getPdfJs() {
+  // carrega ESM mesmo se a função estiver em CJS
+  return await import("pdfjs-dist/legacy/build/pdf.mjs");
+}
 
 function normalize(s) {
   return s
@@ -52,6 +56,7 @@ async function downloadPdf(url) {
 
 async function searchTermsInPdf(file, terms, { wantSnippets = false } = {}) {
   const data = await fs.readFile(file);
+  const pdfjsLib = await getPdfJs();                       // <— AQUI é dinâmico
   const loadingTask = pdfjsLib.getDocument({ data });
   const pdfDoc = await loadingTask.promise;
 
