@@ -1,7 +1,10 @@
+# netlify.toml
+
 [functions]
   node_bundler = "esbuild"
   # evita embutir libs grandes no bundle
   external_node_modules = ["pdfjs-dist", "@netlify/blobs"]
+  directory = "netlify/functions"
 
 [[redirects]]
   from = "/status"
@@ -18,17 +21,15 @@
   to = "/.netlify/functions/admin"
   status = 200
 
-[functions]
-directory = "netlify/functions"
+# Agendamentos (horários em UTC!)
+[[scheduled.functions]]
+  name = "check-doepb"
+  cron = "5 11 * * *"
 
 [[scheduled.functions]]
-name = "check-doepb"
-cron = "5 11 * * *"
+  name = "check-doepb"
+  cron = "5 14 * * *"
 
 [[scheduled.functions]]
-name = "check-doepb"
-cron = "5 14 * * *"
-
-[[scheduled.functions]]
-name = "check-doepb"
-cron = "5 17 * * *"
+  name = "check-doepb"
+  cron = "5 17 * * *"
