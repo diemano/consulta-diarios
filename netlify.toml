@@ -3,11 +3,6 @@
   # evita embutir libs grandes no bundle
   external_node_modules = ["pdfjs-dist", "@netlify/blobs"]
 
-[[scheduled.functions]]
-  path = "check-doepb"
-  # roda todo dia às 08:40 (Horário de Fortaleza, UTC-3)
-  schedule = "CRON_TZ=America/Fortaleza 40 8 * * *"
-
 [[redirects]]
   from = "/status"
   to = "/.netlify/functions/status"
