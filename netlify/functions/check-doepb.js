@@ -13,10 +13,9 @@ const store = getStore({ name: "doe-history", siteID, token, consistency: "stron
 
 async function loadHistory() {
   const raw = await store.get("history.json");
-  // estrutura nova: { lastSeen: { [fonte]: hrefOuChave }, runs: [] }
   if (!raw) return { lastSeen: {}, runs: [] };
   const j = JSON.parse(raw);
-  if (j.lastSeenHref) { // compat: migrar do antigo
+  if (j.lastSeenHref) { // compatibilidade com versão antiga
     j.lastSeen = { "DOE/PB": j.lastSeenHref };
     delete j.lastSeenHref;
   }
@@ -40,13 +39,11 @@ function clean(s) {
     .normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
     .replace(/\s+/g, " ");
 }
-
 function makeElasticRegex(term) {
   const letters = clean(term).replace(/[^a-z0-9]/g, "");
   const esc = letters.split("").map(ch => ch.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&")).join("\\W*");
   return new RegExp(esc, "iu");
 }
-
 function extractDoeEditionFromUrl(u) {
   const m = /diario-oficial-(\d{2})-(\d{2})-(\d{4})-portal\.pdf/i.exec(u || "");
   if (!m) return null;
@@ -123,58 +120,6 @@ async function searchTermsInPdf(file, terms, { wantSnippets = false } = {}) {
   return { hits, snippets };
 }
 
-// ===== Envio de e-mail via Netlify Emails (Mailgun) =====
-async function notifyEmail({ to, subject, parameters }) {
-  const base =
-    process.env.URL ||
-    process.env.DEPLOY_PRIME_URL ||
-    "http://localhost:8888";
-  const endpoint = `${base}/.netlify/functions/emails/alert`;
-
-  const secret = process.env.NETLIFY_EMAILS_SECRET;
-  if (!secret) throw new Error("NETLIFY_EMAILS_SECRET não definido.");
-
-  const payload = {
-    from: process.env.MAIL_FROM || "no-reply@seu-dominio.com",
-    to: to || process.env.MAIL_TO,
-    subject,
-    parameters: {
-      source: parameters?.source,
-      edition: parameters?.edition,
-      pdfUrl: parameters?.pdfUrl,
-      found: !!parameters?.found,
-      hits: Array.isArray(parameters?.hits) ? parameters.hits.join(", ") : (parameters?.hits || ""),
-      snippets: parameters?.snippets || "",
-      groupName: parameters?.groupName || ""
-    }
-  };
-
-  const res = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      "netlify-emails-secret": secret,
-      "content-type": "application/json"
-    },
-    body: JSON.stringify(payload)
-  });
-
-  if (!res.ok) {
-    const t = await res.text().catch(() => "");
-    throw new Error(`Falha ao enviar e-mail (${res.status}): ${t}`);
-  }
-}
-
-async function notifyTelegram({ text }) {
-  const { TG_BOT_TOKEN, TG_CHAT_ID } = process.env;
-  if (!TG_BOT_TOKEN || !TG_CHAT_ID) return;
-  const url = `https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`;
-  await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ chat_id: TG_CHAT_ID, text, disable_web_page_preview: true })
-  });
-}
-
 // ===== Coletoras de fontes =====
 async function collectDOE() {
   const url = await fetchLatestDoePdfUrl();
@@ -203,24 +148,22 @@ async function collectDEJT() {
 export const handler = async (event) => {
   try {
     const qp = event?.queryStringParameters || {};
-    const urlOverride = qp.url;              // força um PDF específico
+    const urlOverride = qp.url;
     const sourceFilter = (qp.source || "").toLowerCase(); // "doepb" | "dejt"
     const termsOverride = qp.terms || qp.t || "";
-    const dry = qp.dry === "1";
     const wantSnippets = qp.snippets === "1";
-    const save = qp.save === "1";            // permite salvar histórico mesmo com url=...
-    const SEND_EMPTY = process.env.SEND_EMPTY === "1";
+    const save = qp.save === "1";
 
     const hist = await loadHistory();
     const config = await loadConfig(store);
     const groups = Array.isArray(config.groups) ? config.groups : [];
 
-    // Fontes-alvo conforme ?source=
+    // Fontes alvo
     const sourcesWanted = !sourceFilter
       ? ["DOE/PB", "DEJT TRT-13"]
       : (sourceFilter === "dejt" ? ["DEJT TRT-13"] : ["DOE/PB"]);
 
-    // Termos: override (?terms) > grupos (por fonte) > TERMs de env
+    // Termos: override (?t=) > grupos (por fonte) > TERMs de env
     let TERMS = (termsOverride || process.env.TERMS || "")
       .split(",").map(s => s.trim()).filter(Boolean);
 
@@ -250,58 +193,12 @@ export const handler = async (event) => {
                    : (editionDoe ? "DOE/PB" : "DEJT TRT-13");
       const edition = editionDoe || new Date().toLocaleDateString("pt-BR", { timeZone: "America/Fortaleza" });
 
-      // alertas por GRUPO (manual)
-      const matchedGroups = groups.filter(g =>
-        (g.sources || []).includes(source) &&
-        (g.terms || []).some(t => hits.includes(t))
-      );
-      for (const g of matchedGroups) {
-        if (g.notifyEmail && g.email) {
-          await notifyEmail({
-            to: g.email,
-            subject: `[${source}] (${g.name}) encontrei ${hits.join(", ")}`,
-            parameters: {
-              source,
-              edition,
-              pdfUrl: urlOverride,
-              found,
-              hits,
-              snippets: wantSnippets && snippets?.length ? snippets.join("\n---\n") : "",
-              groupName: g.name
-            }
-          });
-        }
-      }
-
-      // alerta GLOBAL (manual)
-      if (found && !dry) {
-        await notifyEmail({
-          subject: `[${source}] encontrei ${hits.join(", ")} 🎯`,
-          parameters: {
-            source,
-            edition,
-            pdfUrl: urlOverride,
-            found: true,
-            hits,
-            snippets: wantSnippets && snippets?.length ? snippets.join("\n---\n") : ""
-          }
-        });
-        await notifyTelegram({ text: `${source} ✅ ${hits.join(", ")}\n${urlOverride}` });
-      } else if (!found && SEND_EMPTY && !dry) {
-        await notifyEmail({
-          subject: `[${source}] nenhum termo encontrado`,
-          parameters: {
-            source,
-            edition,
-            pdfUrl: urlOverride,
-            found: false,
-            hits: []
-          }
-        });
-        await notifyTelegram({ text: `${source} ⭕ nada\n${urlOverride}` });
-      }
-
+      // histórico (opcional via ?save=1)
       if (save) {
+        const matchedGroups = groups.filter(g =>
+          (g.sources || []).includes(source) &&
+          (g.terms || []).some(t => hits.includes(t))
+        );
         const groupsHit = matchedGroups.map(g => g.name);
         const entry = { when: new Date().toISOString(), source, edition, pdfUrl: urlOverride, found, hits, groupsHit };
         hist.runs.unshift(entry);
@@ -344,65 +241,18 @@ export const handler = async (event) => {
       const { hits, snippets } = await searchTermsInPdf(file, TERMS, { wantSnippets });
       const found = hits.length > 0;
 
-      // alertas por GRUPO (diário)
+      // histórico básico
+      hist.lastSeen[meta.source] = meta.dedupKey;
       const matchedGroups = groups.filter(g =>
         (g.sources || []).includes(meta.source) &&
         (g.terms || []).some(t => hits.includes(t))
       );
-      for (const g of matchedGroups) {
-        if (g.notifyEmail && g.email) {
-          await notifyEmail({
-            to: g.email,
-            subject: `[${meta.source}] (${g.name}) encontrei ${hits.join(", ")}`,
-            parameters: {
-              source: meta.source,
-              edition: meta.edition,
-              pdfUrl: meta.url,
-              found,
-              hits,
-              snippets: wantSnippets && snippets?.length ? snippets.join("\n---\n") : "",
-              groupName: g.name
-            }
-          });
-        }
-      }
-
-      // alerta GLOBAL (diário)
-      if (found && !dry) {
-        await notifyEmail({
-          subject: `[${meta.source}] encontrei ${hits.join(", ")} 🎯`,
-          parameters: {
-            source: meta.source,
-            edition: meta.edition,
-            pdfUrl: meta.url,
-            found: true,
-            hits,
-            snippets: wantSnippets && snippets?.length ? snippets.join("\n---\n") : ""
-          }
-        });
-        await notifyTelegram({ text: `${meta.source} ✅ ${hits.join(", ")}\n${meta.url}` });
-      } else if (!found && SEND_EMPTY && !dry) {
-        await notifyEmail({
-          subject: `[${meta.source}] nenhum termo encontrado`,
-          parameters: {
-            source: meta.source,
-            edition: meta.edition,
-            pdfUrl: meta.url,
-            found: false,
-            hits: []
-          }
-        });
-        await notifyTelegram({ text: `${meta.source} ⭕ nada\n${meta.url}` });
-      }
-
-      // histórico
-      hist.lastSeen[meta.source] = meta.dedupKey;
       const groupsHit = matchedGroups.map(g => g.name);
       const entry = { when: new Date().toISOString(), source: meta.source, edition: meta.edition, pdfUrl: meta.url, found, hits, groupsHit };
       hist.runs.unshift(entry);
       hist.runs = hist.runs.slice(0, 300);
 
-      results.push({ ...meta, found, hits, count: hits.length });
+      results.push({ ...meta, found, hits, count: hits.length, ...(wantSnippets ? { snippets } : {}) });
     }
 
     await saveHistory(hist);
