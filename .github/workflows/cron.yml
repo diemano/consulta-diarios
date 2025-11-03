@@ -22,4 +22,4 @@ jobs:
         run: |
           set -euo pipefail
           curl -fsS --retry 3 --max-time 120 \
-            "$SITE_URL/.netlify/functions/check-doepb?snippets=1"
+            "$SITE_URL/.netlify/functions/check-doepb?snippets=1&dry=1"
