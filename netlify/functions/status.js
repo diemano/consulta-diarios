@@ -59,13 +59,15 @@ exports.handler = async () => {
   }
 
   const j = JSON.parse(raw);
-  const runs = (j.runs || []).map(r => {
+  let runs = (j.runs || []).map(r => {
     const edition = r.edition || (() => {
       const m = /diario-oficial-(\d{2})-(\d{2})-(\d{4})-portal\.pdf/i.exec(r.pdfUrl || "");
       return m ? `${m[1]}/${m[2]}/${m[3]}` : "-";
     })();
     const source = r.source || (r.pdfUrl && r.pdfUrl.includes("auniao.pb.gov.br") ? "DOE/PB" : "DEJT TRT-13");
     const terms = Array.isArray(r.hits) ? r.hits : [];
+    const hitCounts = r.hitCounts || {};
+    const totalIncidencias = Object.values(hitCounts).reduce((a,b)=>a+b, 0);
     return {
       when: r.when,
       whenFmt: new Date(r.when).toLocaleString("pt-BR", { timeZone: "America/Fortaleza" }),
@@ -73,8 +75,19 @@ exports.handler = async () => {
       edition,
       pdfUrl: r.pdfUrl,
       found: !!r.found,
-      terms
+      terms,
+      hitCounts,
+      totalIncidencias
     };
+  });
+
+  // Deduplicação: mantém apenas o registro mais recente por source + edition
+  const seen = new Map();
+  runs = runs.filter(r => {
+    const key = `${r.source}::${r.edition}`;
+    if (seen.has(key)) return false; // já temos um mais recente
+    seen.set(key, true);
+    return true;
   });
 
   const sources = Array.from(new Set(runs.map(r => r.source))).sort();
@@ -160,12 +173,18 @@ exports.handler = async () => {
 
     function render(items){
       $list.innerHTML = items.map(it => {
+        const total = it.totalIncidencias || 0;
         const badge = it.found
-          ? '<span class="badge ok">✅ Encontrado</span>'
+          ? `<span class="badge ok">✅ ${total} incidência${total !== 1 ? 's' : ''}</span>`
           : '<span class="badge nok">⭕ Nada</span>';
 
+        // Chips com contagem individual
+        const hitCounts = it.hitCounts || {};
         const chips = (it.terms && it.terms.length)
-          ? it.terms.map(t => '<span class="chip">'+esc(t)+'</span>').join(' ')
+          ? it.terms.map(t => {
+              const n = hitCounts[t] || 0;
+              return `<span class="chip">${esc(t)}${n > 0 ? ` (${n})` : ''}</span>`;
+            }).join(' ')
           : '<span class="muted">—</span>';
 
         return \`

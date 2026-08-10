@@ -130,24 +130,32 @@ async function searchTermsInPdf(file, terms, { wantSnippets = false } = {}) {
 
   const textClean = clean(raw);
   const hits = [];
+  const hitCounts = {};  // termo -> nº de incidências
   const snippets = [];
 
   for (const term of terms) {
     const rx = makeElasticRegex(term);
-    const m = textClean.match(rx);
-    if (m) {
+    // matchAll para contar TODAS as incidências, não só a primeira
+    const matches = [...textClean.matchAll(new RegExp(rx.source, "giu"))];
+    if (matches.length > 0) {
       hits.push(term);
+      hitCounts[term] = matches.length;
       if (wantSnippets) {
-        const idx = m.index ?? 0;
-        const approxStart = Math.max(0, Math.floor(idx * (raw.length / textClean.length)) - 200);
-        const approxEnd = Math.min(raw.length, approxStart + 400);
-        const snippetRaw = raw.slice(approxStart, approxEnd).replace(/\s+/g, " ");
-        snippets.push(`[…] ${snippetRaw} […]`);
+        // Pega snippet de cada match (limitado a 5 para não pesar o e-mail)
+        const maxSnips = 5;
+        for (let i = 0; i < Math.min(matches.length, maxSnips); i++) {
+          const m = matches[i];
+          const idx = m.index ?? 0;
+          const approxStart = Math.max(0, Math.floor(idx * (raw.length / textClean.length)) - 200);
+          const approxEnd = Math.min(raw.length, approxStart + 400);
+          const snippetRaw = raw.slice(approxStart, approxEnd).replace(/\s+/g, " ");
+          snippets.push(`[${i + 1}/${matches.length}] […] ${snippetRaw} […]`);
+        }
       }
     }
   }
 
-  return { hits, snippets };
+  return { hits, hitCounts, snippets };
 }
 
 // ===== Envio de e-mail de alerta =====
@@ -169,37 +177,48 @@ async function sendAlertEmail(group, result, wantSnippets) {
 
   // Monta snippets (se disponíveis)
   let snippetsHtml = "";
-  if (wantSnippets && result.snippets && result.snippets.length) {
-    const escaped = result.snippets.map(s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"));
-    snippetsHtml = escaped.map(s => `<p style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:10px;margin:6px 0;white-space:pre-wrap">${s}</p>`).join("");
+  if (result.snippets && result.snippets.length) {
+    const escaped = result.snippets.map(s =>
+      s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")
+    );
+    snippetsHtml = escaped.map(s =>
+      `<p style="margin:6px 0;padding:12px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;font-size:13px;color:#374151;line-height:1.5;">${s}</p>`
+    ).join("");
   }
 
-  // Template simples (substituição direta — o template original usa {{mustache}})
+  // Monta resumo com contagem de incidências
+  const hitCounts = result.hitCounts || {};
+  const countResumo = (result.hits || []).map(t => {
+    const n = hitCounts[t] || 0;
+    return `<strong>${t}</strong>: ${n} incidência${n > 1 ? "s" : ""}`;
+  }).join("<br>");
+
+  // Template simples (substituição direta)
   let template;
   try {
     template = await fs.readFile(EMAIL_TEMPLATE_PATH, "utf-8");
   } catch {
-    // fallback inline
-    template = `<html><body style="font-family:system-ui;margin:0;padding:24px;background:#f6f7f9;"><div style="max-width:640px;margin:0 auto;background:#fff;border-radius:12px;padding:24px;border:1px solid #eef1f4;"><h2>{{source}} — ✅ termos encontrados</h2><p><b>Edição:</b> {{edition}} · <a href="{{pdfUrl}}">Abrir PDF</a></p><p><b>Termos:</b> {{hits}}</p>{{snippets}}<p style="margin-top:16px;font-size:12px;color:#6b7280;">Grupo: {{groupName}}</p></div></body></html>`;
+    template = `<html><body style="font-family:system-ui;margin:0;padding:24px;background:#f0f2f5;"><div style="max-width:640px;margin:0 auto;background:#fff;border-radius:16px;padding:24px;box-shadow:0 2px 12px rgba(0,0,0,.08);"><h2 style="color:#1f2937;">✅ Termos encontrados em {{source}}</h2><p style="color:#6b7280;">Edição: <strong>{{edition}}</strong></p><div style="background:#eef2ff;border-radius:12px;padding:14px;margin:12px 0;">{{countResumo}}</div>{{snippets}}<a href="{{pdfUrl}}" target="_blank" style="display:inline-block;margin-top:16px;padding:12px 20px;background:#4f46e5;color:#fff;text-decoration:none;border-radius:10px;font-weight:600;">📄 Abrir PDF</a><p style="margin-top:20px;font-size:12px;color:#9ca3af;">Grupo: {{groupName}} · {{dateNow}}</p></div></body></html>`;
   }
 
-  // Remove blocos condicionais (enviamos só quando found=true)
+  const dateNow = new Date().toLocaleDateString("pt-BR", { timeZone: "America/Fortaleza", day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+
   let html = template
-    .replace(/\{\{#if found\}\}/g, "")
-    .replace(/\{\{\/if\}\}/g, "")
-    .replace(/\{\{#if snippets\}\}/g, "")
-    .replace(/\{\{#else\}\}/g, "")
     .replace(/\{\{source\}\}/g, result.source)
     .replace(/\{\{edition\}\}/g, result.edition)
-    .replace(/\{\{pdfUrl\}\}/g, result.pdfUrl)
+    .replace(/\{\{pdfUrl\}\}/g, result.pdfUrl || "")
+    .replace(/\{\{countResumo\}\}/g, countResumo)
     .replace(/\{\{hits\}\}/g, (result.hits || []).join(", "))
     .replace(/\{\{snippets\}\}/g, snippetsHtml)
     .replace(/\{\{groupName\}\}/g, group.name)
-    // remove blocos else (caso não encontrado — não usado aqui)
+    .replace(/\{\{dateNow\}\}/g, dateNow)
+    .replace(/\{\{#if\s+snippets\}\}/g, "")
+    .replace(/\{\{\/if\}\}/g, "")
     .replace(/\{\{#if\s+found\}\}[\s\S]*?\{\{\/if\}\}/g, "")
     .replace(/\{\{#if\s+snippets\}\}[\s\S]*?\{\{\/if\}\}/g, snippetsHtml);
 
-  const subject = `Monitor Diários: ${result.hits.length} termo(s) em ${result.source} — ${result.edition}`;
+  const totalIncidencias = Object.values(hitCounts).reduce((a, b) => a + b, 0);
+  const subject = `🔔 ${totalIncidencias} incidência(s) em ${result.source} — ${result.edition}`;
 
   try {
     await transporter.sendMail({
@@ -334,7 +353,7 @@ export const handler = async (event) => {
         }
 
         const file = await downloadPdf(meta.url);
-        const { hits, snippets } = await searchTermsInPdf(file, TERMS, { wantSnippets });
+        const { hits, hitCounts, snippets } = await searchTermsInPdf(file, TERMS, { wantSnippets });
         const found = hits.length > 0;
 
         // histórico básico
@@ -344,16 +363,16 @@ export const handler = async (event) => {
           (g.terms || []).some(t => hits.includes(t))
         );
         const groupsHit = matchedGroups.map(g => g.name);
-        const entry = { when: new Date().toISOString(), source: meta.source, edition: meta.edition, pdfUrl: meta.url, found, hits, groupsHit };
+        const entry = { when: new Date().toISOString(), source: meta.source, edition: meta.edition, pdfUrl: meta.url, found, hits, hitCounts, groupsHit };
         hist.runs.unshift(entry);
         hist.runs = hist.runs.slice(0, 300);
 
-        results.push({ ...meta, found, hits, count: hits.length, ...(wantSnippets ? { snippets } : {}) });
+        results.push({ ...meta, found, hits, hitCounts, count: hits.length, totalIncidencias: Object.values(hitCounts).reduce((a,b)=>a+b,0), ...(wantSnippets ? { snippets } : {}) });
 
         // Envia e-mails para grupos que tiveram matches nesta fonte
         if (found && matchedGroups.length) {
           for (const group of matchedGroups) {
-            await sendAlertEmail(group, { ...meta, found, hits, snippets: wantSnippets ? snippets : [] }, wantSnippets);
+            await sendAlertEmail(group, { ...meta, found, hits, hitCounts, snippets: wantSnippets ? snippets : [] }, wantSnippets);
           }
         }
       } catch (collectErr) {
