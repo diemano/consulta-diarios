@@ -106,7 +106,16 @@ async function searchTermsInPdf(file, terms, { wantSnippets = false } = {}) {
   const data = new Uint8Array(buf);
 
   const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
-  const loadingTask = pdfjsLib.getDocument({ data });
+
+  // Configura CMaps — essencial para PDFs com fontes customizadas (ex: diários oficiais brasileiros)
+  // pdfjs-dist já inclui os CMaps em pdfjs-dist/cmaps/
+  const cmapDir = path.join(process.cwd(), "node_modules", "pdfjs-dist", "cmaps");
+  const loadingTask = pdfjsLib.getDocument({
+    data,
+    cMapUrl: cmapDir + "/",
+    cMapPacked: true,
+    standardFontDataUrl: cmapDir + "/",
+  });
   const pdfDoc = await loadingTask.promise;
 
   let raw = "";
@@ -115,6 +124,9 @@ async function searchTermsInPdf(file, terms, { wantSnippets = false } = {}) {
     const tc = await page.getTextContent();
     raw += tc.items.map(it => (it.str || "")).join(" ") + "\n";
   }
+
+  // Debug: loga quantos caracteres foram extraídos
+  console.log(`PDF extraído: ${raw.length} caracteres em ${pdfDoc.numPages} páginas. Amostra: ${raw.slice(0, 200)}`);
 
   const textClean = clean(raw);
   const hits = [];
