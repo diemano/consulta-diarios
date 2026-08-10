@@ -1,0 +1,13 @@
+# Dependências
+node_modules/
+
+# Build
+.netlify/
+
+# Ambiente
+.env
+.env.local
+
+# Sistema
+.DS_Store
+Thumbs.db

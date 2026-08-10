@@ -1,0 +1,12 @@
+{
+  "name": "monitor-doe-pb",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "@netlify/blobs": "^6.4.0",
+    "he": "^1.2.0",
+    "node-fetch": "^3.3.2",
+    "nodemailer": "^6.9.13",
+    "pdfjs-dist": "^4.8.69"
+  }
+}
