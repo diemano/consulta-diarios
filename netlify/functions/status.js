@@ -175,7 +175,7 @@ exports.handler = async () => {
       $list.innerHTML = items.map(it => {
         const total = it.totalIncidencias || 0;
         const badge = it.found
-          ? `<span class="badge ok">✅ ${total} incidência${total !== 1 ? 's' : ''}</span>`
+          ? \`<span class="badge ok">✅ \${total} incidência\${total !== 1 ? 's' : ''}</span>\`
           : '<span class="badge nok">⭕ Nada</span>';
 
         // Chips com contagem individual
@@ -183,7 +183,7 @@ exports.handler = async () => {
         const chips = (it.terms && it.terms.length)
           ? it.terms.map(t => {
               const n = hitCounts[t] || 0;
-              return `<span class="chip">${esc(t)}${n > 0 ? ` (${n})` : ''}</span>`;
+              return \`<span class="chip">\${esc(t)}\${n > 0 ? \` (\${n})\` : ''}</span>\`;
             }).join(' ')
           : '<span class="muted">—</span>';
 
