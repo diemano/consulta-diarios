@@ -7,6 +7,11 @@
   directory = "netlify/functions"
 
 [[redirects]]
+  from = "/"
+  to = "/.netlify/functions/status"
+  status = 200
+
+[[redirects]]
   from = "/status"
   to = "/.netlify/functions/status"
   status = 200
