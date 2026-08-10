@@ -25,6 +25,9 @@
 [[scheduled.functions]]
   name = "check-doepb"
   cron = "5 11 * * *"
+
+[[scheduled.functions]]
+  name = "check-doepb"
   cron = "5 14 * * *"
 
 [[scheduled.functions]]
