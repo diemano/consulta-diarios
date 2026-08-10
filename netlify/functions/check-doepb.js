@@ -247,6 +247,7 @@ export const handler = async (event) => {
     const termsOverride = qp.terms || qp.t || "";
     const wantSnippets = qp.snippets === "1";
     const save = qp.save === "1";
+    const force = qp.force === "1";
 
     const hist = await loadHistory();
     const config = await loadConfig(store);
@@ -327,7 +328,7 @@ export const handler = async (event) => {
         const meta = await collect(); // { source, url, edition, dedupKey }
         const lastSeenKey = hist.lastSeen[meta.source];
 
-        if (lastSeenKey === meta.dedupKey) {
+        if (!force && lastSeenKey === meta.dedupKey) {
           results.push({ ...meta, skipped: true, message: "Sem edição nova." });
           continue;
         }
