@@ -258,10 +258,27 @@ async function collectDEJT() {
 }
 
 // ===== Handler =====
-export const handler = async (event) => {
+function jsonResponse(obj, status = 200) {
+  return new Response(JSON.stringify(obj, null, 2), {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8" },
+  });
+}
+
+export default async (req, context) => {
   try {
-    const qp = event?.queryStringParameters || {};
-    console.log("check-doepb acionado:", JSON.stringify(qp), "httpMethod:", event?.httpMethod);
+    // Invocações agendadas não têm query string (o corpo é { next_run }).
+    // Teste local: netlify functions:invoke check-doepb --query "url=...&force=1"
+    let qp = {};
+    try {
+      const u = new URL(req?.url || "http://localhost");
+      u.searchParams.forEach((v, k) => { qp[k] = v; });
+    } catch { /* sem URL utilizável */ }
+
+    let nextRun = null;
+    try { nextRun = (await req.json())?.next_run || null; } catch { /* sem corpo */ }
+
+    console.log("check-doepb acionado:", JSON.stringify(qp), "next_run:", nextRun);
     const urlOverride = qp.url;
     const sourceFilter = (qp.source || "").toLowerCase(); // "doepb" | "dejt"
     const termsOverride = qp.terms || qp.t || "";
@@ -294,7 +311,7 @@ export const handler = async (event) => {
 
     if (!TERMS.length) {
       console.warn("check-doepb: nenhum termo configurado. Crie grupos em /admin ou defina a env TERMS.");
-      return { statusCode: 200, body: "Sem termos configurados (grupos) para as fontes selecionadas. Crie grupos em /admin ou defina a env TERMS." };
+      return new Response("Sem termos configurados (grupos) para as fontes selecionadas. Crie grupos em /admin ou defina a env TERMS.", { status: 200 });
     }
 
     // ===== Modo MANUAL (url=...) =====
@@ -322,19 +339,15 @@ export const handler = async (event) => {
         await saveHistory(hist);
       }
 
-      return {
-        statusCode: 200,
-        headers: { "content-type": "application/json; charset=utf-8" },
-        body: JSON.stringify({
-          source,
-          pdfUrl: urlOverride,
-          edition,
-          termsUsed: TERMS,
-          count: hits.length,
-          hits,
-          ...(wantSnippets ? { snippets } : {})
-        }, null, 2)
-      };
+      return jsonResponse({
+        source,
+        pdfUrl: urlOverride,
+        edition,
+        termsUsed: TERMS,
+        count: hits.length,
+        hits,
+        ...(wantSnippets ? { snippets } : {})
+      });
     }
 
     // ===== Execução DIÁRIA =====
@@ -385,14 +398,14 @@ export const handler = async (event) => {
 
     await saveHistory(hist);
 
-    return {
-      statusCode: 200,
-      headers: { "content-type": "application/json; charset=utf-8" },
-      body: JSON.stringify({ termsUsed: TERMS, results }, null, 2)
-    };
+    return jsonResponse({ termsUsed: TERMS, results });
 
   } catch (e) {
     console.error(e);
-    return { statusCode: 500, body: "Erro: " + e.message };
+    return new Response("Erro: " + e.message, { status: 500 });
   }
+};
+
+export const config = {
+  schedule: "5 11,14,17 * * *",
 };
