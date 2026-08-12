@@ -261,6 +261,7 @@ async function collectDEJT() {
 export const handler = async (event) => {
   try {
     const qp = event?.queryStringParameters || {};
+    console.log("check-doepb acionado:", JSON.stringify(qp), "httpMethod:", event?.httpMethod);
     const urlOverride = qp.url;
     const sourceFilter = (qp.source || "").toLowerCase(); // "doepb" | "dejt"
     const termsOverride = qp.terms || qp.t || "";
@@ -292,7 +293,8 @@ export const handler = async (event) => {
     }
 
     if (!TERMS.length) {
-      return { statusCode: 200, body: "Sem termos configurados (grupos) para as fontes selecionadas." };
+      console.warn("check-doepb: nenhum termo configurado. Crie grupos em /admin ou defina a env TERMS.");
+      return { statusCode: 200, body: "Sem termos configurados (grupos) para as fontes selecionadas. Crie grupos em /admin ou defina a env TERMS." };
     }
 
     // ===== Modo MANUAL (url=...) =====
