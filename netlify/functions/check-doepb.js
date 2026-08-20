@@ -34,6 +34,9 @@ async function loadHistory() {
 async function saveHistory(h) {
   await store.set("history.json", JSON.stringify(h));
 }
+async function writeLastRun(obj) {
+  await store.set("last-run.json", JSON.stringify(obj));
+}
 
 // ==== Config (grupos) no mesmo store ====
 async function loadConfig(store) {
@@ -279,6 +282,10 @@ export default async (req, context) => {
     try { nextRun = (await req.json())?.next_run || null; } catch { /* sem corpo */ }
 
     console.log("check-doepb acionado:", JSON.stringify(qp), "next_run:", nextRun);
+
+    // Heartbeat: se a função morrer no meio (timeout/OOM), o /status.json mostra "started".
+    try { await writeLastRun({ at: new Date().toISOString(), phase: "started", qp }); } catch (_) {}
+
     const urlOverride = qp.url;
     const sourceFilter = (qp.source || "").toLowerCase(); // "doepb" | "dejt"
     const termsOverride = qp.terms || qp.t || "";
@@ -392,16 +399,22 @@ export default async (req, context) => {
         }
       } catch (collectErr) {
         console.error(`Erro ao processar fonte:`, collectErr.message);
-        results.push({ error: collectErr.message });
+        results.push({ error: collectErr.message, stack: collectErr.stack });
       }
     }
 
     await saveHistory(hist);
 
+    // Registra o resultado desta execução para diagnóstico em /status.json
+    try { await writeLastRun({ at: new Date().toISOString(), phase: "finished", ok: true, results }); } catch (_) {}
+
     return jsonResponse({ termsUsed: TERMS, results });
 
   } catch (e) {
     console.error(e);
+    try {
+      await writeLastRun({ at: new Date().toISOString(), phase: "error", ok: false, error: e.message, stack: e.stack });
+    } catch (_) { /* se o próprio Blobs falhar, não há onde gravar */ }
     return new Response("Erro: " + e.message, { status: 500 });
   }
 };
