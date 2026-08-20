@@ -110,6 +110,14 @@ async function searchTermsInPdf(file, terms, { wantSnippets = false } = {}) {
 
   const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
 
+  // No Node.js o pdf.js usa um "fake worker" e tenta importar dinamicamente
+  // o arquivo pdf.worker.mjs. Esse import relativo quebra no runtime do Netlify
+  // (o arquivo não é empacotado). Importando o worker aqui e expondo em
+  // globalThis.pdfjsWorker, o pdf.js usa o handler já carregado em memória e
+  // dispensa o import dinâmico do arquivo.
+  const pdfjsWorker = await import("pdfjs-dist/legacy/build/pdf.worker.mjs");
+  globalThis.pdfjsWorker = pdfjsWorker;
+
   // Configura CMaps — essencial para PDFs com fontes customizadas (ex: diários oficiais brasileiros)
   // pdfjs-dist já inclui os CMaps em pdfjs-dist/cmaps/
   const cmapDir = path.join(process.cwd(), "node_modules", "pdfjs-dist", "cmaps");
