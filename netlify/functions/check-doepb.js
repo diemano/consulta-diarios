@@ -406,6 +406,10 @@ export default async (req, context) => {
   }
 };
 
+// Background function: roda por até 15 min. A leitura do PDF passa de 30s,
+// que é o limite das scheduled functions do Netlify — por isso o agendamento
+// ficou por conta do GitHub Actions (.github/workflows/daily-check.yml),
+// que apenas chama a URL desta função nos horários configurados.
 export const config = {
-  schedule: "5 11,14,17 * * *",
+  background: true,
 };

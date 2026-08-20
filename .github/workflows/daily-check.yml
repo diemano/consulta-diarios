@@ -1,0 +1,22 @@
+name: Rodar monitor diário (08h, 11h e 14h BRT)
+
+on:
+  schedule:
+    # Horários em UTC: 08:05, 11:05 e 14:05 BRT (UTC-3)
+    - cron: "5 11,14,17 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  hit-function:
+    runs-on: ubuntu-latest
+    env:
+      SITE_URL: ${{ secrets.SITE_URL || 'https://consultadiarios.netlify.app' }}
+    steps:
+      - name: Disparar check-doepb (background function)
+        run: |
+          set -euo pipefail
+          url="$SITE_URL/.netlify/functions/check-doepb?snippets=1"
+          echo "Disparando: $url"
+          # A função é background: responde 202 imediatamente e roda no Netlify
+          # por até 15 min. Resultados ficam em /status e e-mails saem da própria função.
+          curl -fsS --retry 3 --retry-delay 30 --max-time 120 "$url"
